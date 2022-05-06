@@ -33,7 +33,9 @@ var UngaBungaMode string = ""
 
 const GGStriveExe = "GGST-Win64-Shipping.exe"
 
-const APIOffsetAddr uintptr = 0x33EE420 // 1.09
+const APIOffsetAddr uintptr = 0x34D23F8 // 1.16
+
+const PatchRetries = 30
 
 const GGStriveAPIURL = "https://ggst-game.guiltygear.com/api/"
 const PatchedAPIURL = "http://127.0.0.1:21611/api/"
@@ -135,7 +137,7 @@ func watchGGST(noClose bool, ctx context.Context) {
 			if err != nil {
 				if errors.Is(err, patcher.ErrProcessNotFound) {
 					if close {
-						sig <- os.Interrupt
+						sig <- os.Interrupt // Gracefully shutdown
 						return
 					}
 
@@ -152,12 +154,18 @@ func watchGGST(noClose bool, ctx context.Context) {
 			if pid == patchedPid {
 				cancelableSleep(ctx, 5*time.Second)
 				continue
+			} else if patchedPid > 1 { // Catch case where GGST restarts in between detection loop.
+				continue
 			}
 			var retry int
-			for retry = 0; retry < 3; retry++ {
+			for retry = 0; retry < PatchRetries; retry++ {
 				cancelableSleep(ctx, 1000*time.Millisecond) // Give GGST some time to finish loading. EnumProcessModules() doesn't like modules changing while it's running.
 				var offset uintptr
 				offset, err = patcher.PatchProc(pid, GGStriveExe, APIOffsetAddr, []byte(GGStriveAPIURL), []byte(PatchedAPIURL))
+				if errors.Is(err, patcher.ErrOffsetMismatch) {
+					fmt.Printf("WARNING: Offset found at unknown location. This version of Totsugeki has not been tested with this version of GGST and may cause issues.\n")
+					err = nil
+				}
 				if err != nil {
 					if errors.Is(err, patcher.ErrProcessAlreadyPatched) {
 						fmt.Printf("GGST with PID %d is already patched at offset 0x%x.\n", pid, offset)
@@ -168,10 +176,8 @@ func watchGGST(noClose bool, ctx context.Context) {
 					} else if errors.Unwrap(err) == syscall.Errno(windows.ERROR_ACCESS_DENIED) {
 						messageBox("Could not patch GGST. Steam/GGST may be running as Administrator. Try re-running Totsugeki as Administrator.")
 						os.Exit(1)
-					} else if errors.Is(err, patcher.ErrOffsetMismatch) {
-						fmt.Printf("WARNING: Offset found at unknown location. This version of Totsugeki has not been tested with this version of GGST and may cause issues.\n")
 					} else {
-						fmt.Printf("Error at offset 0x%x: %v\n", offset, err)
+						fmt.Printf("Error with PID %d at offset 0x%x: %v\n", pid, offset, err)
 						continue
 					}
 				} else {
@@ -182,7 +188,7 @@ func watchGGST(noClose bool, ctx context.Context) {
 					break
 				}
 			}
-			if retry >= 3 {
+			if retry >= PatchRetries {
 				panic(err)
 			}
 			patchedPid = pid
@@ -285,6 +291,7 @@ func main() {
 	var unsafeNoNews = flag.Bool("unsafe-no-news", false, "UNSAFE: Return an empty response for news.")
 	var unsafePredictReplay = flag.Bool("unsafe-predict-replay", false, "UNSAFE: Asynchronously precache expected get_replay calls. Needs unsafe-predict-stats-get to work.")
 	var unsafeCacheEnv = flag.Bool("unsafe-cache-env", false, "UNSAFE: Cache first get_env call and return cached version on subsequent calls.")
+	var unsafeCacheFollow = flag.Bool("unsafe-cache-follow", false, "UNSAFE: Cache first get_follow and get_block calls and return cached version on subsequent calls.")
 	var ungaBunga = flag.Bool("unga-bunga", UngaBungaMode != "", "UNSAFE: Enable all unsafe speedups for maximum speed. Please read https://github.com/optix2000/totsugeki/blob/master/UNSAFE_SPEEDUPS.md")
 	var iKnowWhatImDoing = flag.Bool("i-know-what-im-doing", false, "UNSAFE: Suppress any UNSAFE warnings. I hope you know what you're doing...")
 	var ver = flag.Bool("version", false, "Print the version number and exit.")
@@ -327,6 +334,7 @@ func main() {
 		*unsafeNoNews = true
 		*unsafePredictReplay = true
 		*unsafeCacheEnv = true
+		*unsafeCacheFollow = true
 	}
 
 	// Drop process priority
@@ -395,6 +403,7 @@ func main() {
 				NoNews:          *unsafeNoNews,
 				PredictReplay:   *unsafePredictReplay,
 				CacheEnv:        *unsafeCacheEnv,
+				CacheFollow:     *unsafeCacheFollow,
 			})
 
 			fmt.Println("Started Proxy Server on port 21611.")
@@ -417,7 +426,7 @@ func main() {
 		}()
 	}
 
-	if !*iKnowWhatImDoing && (*unsafeAsyncStatsSet || *unsafePredictStatsGet || *unsafeCacheNews || *unsafeNoNews || *unsafeCacheEnv || *unsafePredictReplay) {
+	if !*iKnowWhatImDoing && (*unsafeAsyncStatsSet || *unsafePredictStatsGet || *unsafeCacheNews || *unsafeNoNews || *unsafeCacheEnv || *unsafePredictReplay || *unsafeCacheFollow) {
 		fmt.Println("WARNING: Unsafe feature used. Make sure you understand the implications: https://github.com/optix2000/totsugeki/blob/master/UNSAFE_SPEEDUPS.md")
 	}
 

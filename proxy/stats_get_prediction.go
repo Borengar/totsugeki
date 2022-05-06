@@ -16,10 +16,11 @@ import (
 const StatsGetWorkers = 5
 
 type StatsGetTask struct {
-	data     string
-	path     string
-	request  string
-	response chan *http.Response
+	data         string
+	path         string
+	request      string
+	response     chan *http.Response
+	responseBody []byte
 }
 
 type StatsGetPrediction struct {
@@ -29,6 +30,7 @@ type StatsGetPrediction struct {
 	client          *http.Client
 	PredictReplay   bool
 	skipNext        bool
+	responseCache   *ResponseCache
 }
 
 type PredictionState int
@@ -66,6 +68,20 @@ func (rw *CachingResponseWriter) Write(data []byte) (int, error) {
 	return rw.w.Write(data)
 }
 
+func (s *StatsGetPrediction) proxyRequest(r *http.Request) (*http.Response, error) {
+	apiURL, err := url.Parse(s.GGStriveAPIURL)
+	if err != nil {
+		fmt.Println(err)
+		return nil, err
+	}
+	apiURL.Path = r.URL.Path
+
+	r.URL = apiURL
+	r.Host = ""
+	r.RequestURI = ""
+	return s.client.Do(r)
+}
+
 func (s *StatsGetPrediction) StatsGetStateHandler(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		path := r.URL.Path
@@ -87,7 +103,6 @@ func (s *StatsGetPrediction) StatsGetStateHandler(next http.Handler) http.Handle
 			next.ServeHTTP(w, r)
 		}
 	})
-
 }
 
 // Proxy getstats
@@ -114,16 +129,12 @@ func (s *StatsGetPrediction) HandleGetStats(w http.ResponseWriter, r *http.Reque
 				delete(s.statsGetTasks, req)
 				return false
 			}
-			defer resp.Body.Close()
 			// Copy headers
 			for name, values := range resp.Header {
 				w.Header()[name] = values
 			}
 			w.WriteHeader(resp.StatusCode)
-			_, err := io.Copy(w, resp.Body)
-			if err != nil {
-				fmt.Println(err)
-			}
+			w.Write(task.responseBody)
 			delete(s.statsGetTasks, req)
 			if len(s.statsGetTasks) == 0 {
 				s.predictionState = ready
@@ -173,7 +184,24 @@ func (s *StatsGetPrediction) ProcessStatsQueue(queue chan *StatsGetTask) {
 				fmt.Println(err)
 				item.response <- nil
 			} else {
-				item.response <- res
+				buf, err := io.ReadAll(res.Body)
+				res.Body.Close()
+				if err != nil {
+					fmt.Println(err)
+					item.response <- nil
+				} else {
+					//add get_follow and get_block to the generic response cache instead of the prediction queue
+					if strings.HasSuffix(req.URL.Path, "catalog/get_follow") {
+						s.responseCache.AddResponse("catalog/get_follow", res, buf)
+						delete(s.statsGetTasks, item.request)
+					} else if strings.HasSuffix(req.URL.Path, "catalog/get_block") {
+						s.responseCache.AddResponse("catalog/get_block", res, buf)
+						delete(s.statsGetTasks, item.request)
+					} else {
+						item.responseBody = buf
+						item.response <- res
+					}
+				}
 			}
 		default:
 			fmt.Println("Empty queue, shutting down")
@@ -181,7 +209,6 @@ func (s *StatsGetPrediction) ProcessStatsQueue(queue chan *StatsGetTask) {
 
 		}
 	}
-
 }
 
 func (s *StatsGetPrediction) AsyncGetStats(body []byte, reqType StatsGetType) {
@@ -213,7 +240,7 @@ func (s *StatsGetPrediction) AsyncGetStats(body []byte, reqType StatsGetType) {
 
 		id := bodyConst + task.data + "\x00"
 		task.request = id
-		task.response = make(chan *http.Response)
+		task.response = make(chan *http.Response, 1)
 
 		s.statsGetTasks[id] = &task
 		queue <- &task
@@ -226,7 +253,7 @@ func (s *StatsGetPrediction) AsyncGetStats(body []byte, reqType StatsGetType) {
 	}
 }
 
-func CreateStatsGetPrediction(GGStriveAPIURL string, client *http.Client) StatsGetPrediction {
+func CreateStatsGetPrediction(GGStriveAPIURL string, client *http.Client, responseCache *ResponseCache) StatsGetPrediction {
 	return StatsGetPrediction{
 		GGStriveAPIURL:  GGStriveAPIURL,
 		predictionState: ready,
@@ -234,6 +261,7 @@ func CreateStatsGetPrediction(GGStriveAPIURL string, client *http.Client) StatsG
 		client:          client,
 		PredictReplay:   false,
 		skipNext:        false,
+		responseCache:   responseCache,
 	}
 }
 
@@ -258,80 +286,11 @@ func ExpectedTitleScreenCalls() []StatsGetTask {
 		{data: "96a008ff0effff", path: "statistics/get"},
 		{data: "96a008ff0fffff", path: "statistics/get"},
 		{data: "96a008ff10ffff", path: "statistics/get"},
+		{data: "96a008ff11ffff", path: "statistics/get"},
+		{data: "96a008ff12ffff", path: "statistics/get"},
+		{data: "96a008ff13ffff", path: "statistics/get"},
 		{data: "96a008ffffffff", path: "statistics/get"},
-		{data: "96a006ff00ffff", path: "statistics/get"},
-		{data: "96a006ff01ffff", path: "statistics/get"},
-		{data: "96a006ff02ffff", path: "statistics/get"},
-		{data: "96a006ff03ffff", path: "statistics/get"},
-		{data: "96a006ff04ffff", path: "statistics/get"},
-		{data: "96a006ff05ffff", path: "statistics/get"},
-		{data: "96a006ff06ffff", path: "statistics/get"},
-		{data: "96a006ff07ffff", path: "statistics/get"},
-		{data: "96a006ff08ffff", path: "statistics/get"},
-		{data: "96a006ff09ffff", path: "statistics/get"},
-		{data: "96a006ff0affff", path: "statistics/get"},
-		{data: "96a006ff0bffff", path: "statistics/get"},
-		{data: "96a006ff0cffff", path: "statistics/get"},
-		{data: "96a006ff0dffff", path: "statistics/get"},
-		{data: "96a006ff0effff", path: "statistics/get"},
-		{data: "96a006ff0fffff", path: "statistics/get"},
-		{data: "96a006ff10ffff", path: "statistics/get"},
-		{data: "96a006ffffffff", path: "statistics/get"},
-		{data: "96a005ffffffff", path: "statistics/get"},
-		{data: "96a0020100ffff", path: "statistics/get"},
-		{data: "96a0020101ffff", path: "statistics/get"},
-		{data: "96a0020102ffff", path: "statistics/get"},
-		{data: "96a0020103ffff", path: "statistics/get"},
-		{data: "96a0020104ffff", path: "statistics/get"},
-		{data: "96a0020105ffff", path: "statistics/get"},
-		{data: "96a0020106ffff", path: "statistics/get"},
-		{data: "96a0020107ffff", path: "statistics/get"},
-		{data: "96a0020108ffff", path: "statistics/get"},
-		{data: "96a0020109ffff", path: "statistics/get"},
-		{data: "96a002010affff", path: "statistics/get"},
-		{data: "96a002010bffff", path: "statistics/get"},
-		{data: "96a002010cffff", path: "statistics/get"},
-		{data: "96a002010dffff", path: "statistics/get"},
-		{data: "96a002010effff", path: "statistics/get"},
-		{data: "96a002010fffff", path: "statistics/get"},
-		{data: "96a0020110ffff", path: "statistics/get"},
-		{data: "96a00201ffffff", path: "statistics/get"},
-		{data: "96a0010100feff", path: "statistics/get"},
-		{data: "96a0010100ffff", path: "statistics/get"},
-		{data: "96a0010101feff", path: "statistics/get"},
-		{data: "96a0010101ffff", path: "statistics/get"},
-		{data: "96a0010102feff", path: "statistics/get"},
-		{data: "96a0010102ffff", path: "statistics/get"},
-		{data: "96a0010103feff", path: "statistics/get"},
-		{data: "96a0010103ffff", path: "statistics/get"},
-		{data: "96a0010104feff", path: "statistics/get"},
-		{data: "96a0010104ffff", path: "statistics/get"},
-		{data: "96a0010105feff", path: "statistics/get"},
-		{data: "96a0010105ffff", path: "statistics/get"},
-		{data: "96a0010106feff", path: "statistics/get"},
-		{data: "96a0010106ffff", path: "statistics/get"},
-		{data: "96a0010107feff", path: "statistics/get"},
-		{data: "96a0010107ffff", path: "statistics/get"},
-		{data: "96a0010108feff", path: "statistics/get"},
-		{data: "96a0010108ffff", path: "statistics/get"},
-		{data: "96a0010109feff", path: "statistics/get"},
-		{data: "96a0010109ffff", path: "statistics/get"},
-		{data: "96a001010afeff", path: "statistics/get"},
-		{data: "96a001010affff", path: "statistics/get"},
-		{data: "96a001010bfeff", path: "statistics/get"},
-		{data: "96a001010bffff", path: "statistics/get"},
-		{data: "96a001010cfeff", path: "statistics/get"},
-		{data: "96a001010cffff", path: "statistics/get"},
-		{data: "96a001010dfeff", path: "statistics/get"},
-		{data: "96a001010dffff", path: "statistics/get"},
-		{data: "96a001010efeff", path: "statistics/get"},
-		{data: "96a001010effff", path: "statistics/get"},
-		{data: "96a001010ffeff", path: "statistics/get"},
-		{data: "96a001010fffff", path: "statistics/get"},
-		{data: "96a0010110feff", path: "statistics/get"},
-		{data: "96a0010110ffff", path: "statistics/get"},
-		{data: "96a00101fffeff", path: "statistics/get"},
-		{data: "96a00101ffffff", path: "statistics/get"},
+
 		{data: "93000101", path: "catalog/get_follow"},
 		{data: "920101", path: "catalog/get_block"},
 		{data: "940100059aff00636390ffff000001", path: "catalog/get_replay"}, // these 3 only get used if unsafe-predict-replay is set
@@ -362,6 +321,9 @@ func ExpectedRCodeCalls() []StatsGetTask {
 		{data: "06ff0effff", path: "statistics/get"},
 		{data: "06ff0fffff", path: "statistics/get"},
 		{data: "06ff10ffff", path: "statistics/get"},
+		{data: "06ff11ffff", path: "statistics/get"},
+		{data: "06ff12ffff", path: "statistics/get"},
+		{data: "06ff13ffff", path: "statistics/get"},
 		{data: "06ffffffff", path: "statistics/get"},
 		{data: "05ffffffff", path: "statistics/get"},
 		{data: "020100ffff", path: "statistics/get"},
@@ -381,6 +343,9 @@ func ExpectedRCodeCalls() []StatsGetTask {
 		{data: "02010effff", path: "statistics/get"},
 		{data: "02010fffff", path: "statistics/get"},
 		{data: "020110ffff", path: "statistics/get"},
+		{data: "020111ffff", path: "statistics/get"},
+		{data: "020112ffff", path: "statistics/get"},
+		{data: "020113ffff", path: "statistics/get"},
 		{data: "0201ffffff", path: "statistics/get"},
 		{data: "010100feff", path: "statistics/get"},
 		{data: "010100ffff", path: "statistics/get"},
@@ -416,6 +381,12 @@ func ExpectedRCodeCalls() []StatsGetTask {
 		{data: "01010fffff", path: "statistics/get"},
 		{data: "010110feff", path: "statistics/get"},
 		{data: "010110ffff", path: "statistics/get"},
+		{data: "010111feff", path: "statistics/get"},
+		{data: "010111ffff", path: "statistics/get"},
+		{data: "010112feff", path: "statistics/get"},
+		{data: "010112ffff", path: "statistics/get"},
+		{data: "010113feff", path: "statistics/get"},
+		{data: "010113ffff", path: "statistics/get"},
 		{data: "0101fffeff", path: "statistics/get"},
 		{data: "0101ffffff", path: "statistics/get"},
 	}
